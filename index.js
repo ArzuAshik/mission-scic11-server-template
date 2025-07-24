@@ -1,14 +1,14 @@
+const dotenv = require("dotenv");
+dotenv.config();
 const express = require("express");
 const cors = require("cors");
-
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const {
   MongoClient,
   ServerApiVersion,
   ObjectId,
   ChangeStream,
 } = require("mongodb");
-const dotenv = require("dotenv");
-dotenv.config();
 
 var admin = require("firebase-admin");
 
@@ -108,7 +108,7 @@ async function run() {
       const user = await userCollection.findOne({
         email: req.firebaseUser.email,
       });
-      res.send({ msg: "ok", role: user.role });
+      res.send({ msg: "ok", role: user.role, status: "active" });
     });
 
     app.get(
@@ -157,9 +157,19 @@ async function run() {
     });
 
     app.get("/my-books", verifyFirebaseToken, async (req, res) => {
+      const { page, filter } = req.query;
       const query = { ownerEmail: req.firebaseUser.email };
-      const data = await booksCollection.find(query).toArray();
-      res.send(data);
+
+      if (filter && filter !== "all") {
+        query.status = filter;
+      }
+      const totalCount = await booksCollection.countDocuments(query);
+      const data = await booksCollection
+        .find(query)
+        .skip((page - 1) * 3)
+        .limit(3)
+        .toArray();
+      res.send({ books: data, totalCount });
     });
 
     app.get("/details/:id", async (req, res) => {
@@ -170,10 +180,48 @@ async function run() {
 
     app.patch("/request/:id", verifyFirebaseToken, async (req, res) => {
       const query = { _id: new ObjectId(req.params.id) };
+      const { donationAmount } = req.body;
       const data = await booksCollection.updateOne(query, {
-        $set: { status: "requested", requestedBy: req.firebaseUser.email },
+        $set: {
+          status: "requested",
+          requestedBy: req.firebaseUser.email,
+          donationAmount,
+        },
       });
       res.send(data);
+    });
+
+    app.get("/admin-dashboard-stats", async (req, res) => {
+      const userCount = await userCollection.countDocuments();
+      const bookCount = await booksCollection.countDocuments();
+      const bookRequestCount = await booksCollection.countDocuments({
+        status: "requested",
+      });
+
+      res.send({
+        totalUsers: userCount,
+        totalBooks: bookCount,
+        totalRequest: bookRequestCount,
+      });
+    });
+
+    app.post("/create-payment-intent", async (req, res) => {
+      const { amount } = req.body;
+
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount * 100, // in cents (e.g., 500 = $5.00)
+          currency: "usd",
+          payment_method_types: ["card"],
+          
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     });
 
     console.log("connected");
